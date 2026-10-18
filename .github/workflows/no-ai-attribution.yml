@@ -1,0 +1,107 @@
+name: no-ai-attribution
+# Reusable: fails a pull request whose commit messages (base..head), title or body carry
+# attribution to an AI tool. Call it from a job with the id `no-ai-attribution` and no
+# `name:`, so the check reports as "no-ai-attribution / scan", the context a ruleset
+# requires. See README.md.
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label for the scan job.
+        type: string
+        default: ubuntu-latest
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: 5
+    steps:
+      - name: Require a pull_request event
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "::error::no-ai-attribution runs on pull_request events, not ${GITHUB_EVENT_NAME}."
+          exit 1
+
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: src
+
+      # The scanner and patterns come from the commit of this workflow the caller pinned,
+      # not from the caller's repo, so a PR can't weaken the check it's being checked by.
+      # Empty values would make checkout fall back to the caller's repo; refuse instead.
+      - name: Require the workflow's own commit
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ -z "$WORKFLOW_REPOSITORY" ] || [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error::job.workflow_repository or job.workflow_sha is empty; can't locate the scanner."
+            exit 1
+          fi
+          echo "Scanner: ${WORKFLOW_REPOSITORY}@${WORKFLOW_SHA}"
+
+      - name: Check out the scanner at the pinned commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+          path: .no-ai-attribution
+          sparse-checkout: |
+            bin
+            patterns
+
+      - name: Scan commit messages
+        id: commits
+        continue-on-error: true
+        working-directory: src
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: ../.no-ai-attribution/bin/no-ai-attribution commits "$BASE" "$HEAD"
+
+      # The title and body are read from the API when gh is on the runner, so re-running an
+      # old run sees the current text; otherwise from the event payload, which an `edited`
+      # event refreshes. Both reach the shell as files, never as interpolated script.
+      - name: Scan the PR title and body
+        id: text
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_TITLE: ${{ github.event.pull_request.title }}
+          EVENT_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          scanner=.no-ai-attribution/bin/no-ai-attribution
+          dir=$(mktemp -d)
+          if command -v gh >/dev/null \
+            && gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .title >"$dir/title" 2>/dev/null \
+            && gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.body // ""' >"$dir/body" 2>/dev/null; then
+            echo "Read the title and body from the API."
+          else
+            printf '%s\n' "$EVENT_TITLE" >"$dir/title"
+            printf '%s\n' "$EVENT_BODY" >"$dir/body"
+            echo "Read the title and body from the event payload."
+          fi
+          title_rc=0 body_rc=0
+          "$scanner" text "PR title" "$dir/title" || title_rc=$?
+          "$scanner" text "PR body" "$dir/body" || body_rc=$?
+          [ "$title_rc" -eq 0 ] && [ "$body_rc" -eq 0 ]
+
+      - name: Result
+        env:
+          COMMITS: ${{ steps.commits.outcome }}
+          TEXT: ${{ steps.text.outcome }}
+        run: |
+          echo "commit messages: $COMMITS, PR title and body: $TEXT"
+          [ "$COMMITS" = success ] && [ "$TEXT" = success ]

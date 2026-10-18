@@ -1,0 +1,71 @@
+# AI attribution in commit messages, PR titles and PR bodies.
+#
+# One POSIX extended regular expression per line, matched case-insensitively against
+# each line of text on its own (GNU grep -Ei, LC_ALL=C; \b is GNU's word boundary, so
+# a BSD grep needs ggrep). Lines starting with # and blank
+# lines are ignored. A blank pattern would match everything, so the scanner strips them.
+#
+# Match trailer lines, known boilerplate and session links, never a bare tool name: a PR
+# that discusses a tool or an environment variable such as OPENAI_API_KEY must pass.
+# Every pattern needs a positive case in tests/positive.txt, and every prose shape that
+# a pattern could plausibly hit needs a case in tests/negative.txt.
+
+# --- Co-author trailers ----------------------------------------------------------------
+
+# A co-author whose name carries an unambiguous AI tool or vendor name.
+^[[:space:]]*co-authored-by:[^<]*\b(chatgpt|openai|gpt-?[0-9]|copilot|gemini|codeium|windsurf|aider|tabnine|codewhisperer|amazon q|sourcegraph|deepseek|qwen|grok|cline|roo ?code|kilo ?code|coderabbit|augment ?code|opencode|anthropic|cognition|lovable|claude code)
+# A co-author named only after a tool that is also a human first name (Claude, Devin,
+# Jules, ...): the whole name is the tool, optionally followed by a model or "AI".
+^[[:space:]]*co-authored-by:[[:space:]]*(claude|devin|jules|cursor|cody|junie|amp|codex)([[:space:]]+(opus|sonnet|haiku|fable|instant|agent|ai|code|cli|[0-9][^<[:space:]]*))*[[:space:]]*(<|$)
+# A co-author that is an AI tool's GitHub App or bot account.
+^[[:space:]]*co-authored-by:.*[+<[:space:]](claude|devin-ai-integration|google-labs-jules|copilot-swe-agent|copilot|cursoragent|cursor-agent|cursor|gemini-code-assist|chatgpt-codex-connector|codex|jules|junie|coderabbitai|sweep-ai|amp)(\[bot\]|@users\.noreply\.github\.com)
+# A co-author at an AI vendor's domain.
+^[[:space:]]*co-authored-by:.*@([a-z0-9-]+\.)?(anthropic\.com|openai\.com|cursor\.(com|sh)|anysphere\.co|codeium\.com|windsurf\.com|cognition\.ai|cognition-labs\.com|devin\.ai|aider\.chat|tabnine\.com|coderabbit\.ai|augmentcode\.com|sweep\.dev|cline\.bot|kilocode\.ai|ampcode\.com|opencode\.ai|x\.ai|deepseek\.com|mistral\.ai|lovable\.dev)>?
+
+# --- Vendor noreply and bot addresses on any trailer --------------------------------------
+
+^[[:space:]]*[a-z][a-z-]*:.*(noreply|no-reply|bot|agent)[^@[:space:]<]*@([a-z0-9-]+\.)?(anthropic\.com|openai\.com|cursor\.(com|sh)|anysphere\.co|codeium\.com|windsurf\.com|cognition\.ai|devin\.ai|aider\.chat|tabnine\.com|coderabbit\.ai|augmentcode\.com|sweep\.dev|ampcode\.com|opencode\.ai|x\.ai|deepseek\.com|mistral\.ai)
+
+# --- Provenance and session trailers ------------------------------------------------------
+
+# Generated-by, Assisted-by and their siblings, whatever tool they name.
+^[[:space:]]*(generated|assisted|created|written|authored|co-developed|coded|made|produced|drafted)[- ](by|with|using)[[:space:]]*:
+# AI-Assisted:, LLM-Model:, AI-Tool:, Agent-Session: and similar.
+^[[:space:]]*(ai|llm|genai|agent|model)[- ](assisted|generated|tool|tools|model|session|agent|provenance|usage|disclosure)[[:space:]]*:
+# X-AI-...: style headers used as trailers.
+^[[:space:]]*x-(ai|llm|genai)(-[a-z]+)*[[:space:]]*:
+# The session trailer a coding harness appends (Claude-Session:, Codex-Session:, ...).
+^[[:space:]]*(claude|codex|cursor|copilot|gemini|aider|opencode|devin|jules|amp|ai)[- ]session(-id|-url|-link)?[[:space:]]*:
+
+# --- AI session and chat-share links ------------------------------------------------------
+
+claude\.ai/(chat|share)/
+claude\.ai/code/session
+chatgpt\.com/(share|s|c|g/[^/[:space:]]+/c|codex/tasks)/
+chat\.openai\.com/(share|c)/
+(g\.co/gemini/share|gemini\.google\.com/share)/
+copilot\.microsoft\.com/shares?/
+github\.com/copilot/(c|share|tasks)/
+chat\.deepseek\.com/(a/chat/s|share)/
+(grok\.com/share|x\.com/i/grok/share)/
+poe\.com/s/
+perplexity\.ai/search/
+(app\.)?devin\.ai/sessions/
+jules\.google\.com/(session|task)/
+opencode\.ai/s/
+ampcode\.com/threads/
+v0\.dev/chat/
+
+# --- "Generated with <tool>" boilerplate ------------------------------------------------
+
+# The robot-emoji line, whichever tool it names.
+🤖.*(generated|created|made|written|authored|co-authored|built|produced)[[:space:]]+(with|by|using|in|via)
+# A line that opens with "Generated with Claude Code", "Created by Copilot", "Written using
+# ChatGPT", optionally as a markdown link, an emphasised line or a list item.
+^[[:space:]]*([-*>_][[:space:]]*)*(generated|created|written|made|built|coded|produced|drafted|authored)[[:space:]]+(entirely[[:space:]]+|partially[[:space:]]+|in part[[:space:]]+)?(with|by|using|via)[[:space:]]+(the help of[[:space:]]+)?\[?(claude|chatgpt|openai|codex|copilot|github copilot|gemini|cursor|codeium|windsurf|devin|aider|tabnine|amazon q|cody|jules|junie|opencode|qwen|deepseek|grok|cline|roo code|kilo code|amp|augment|an? (ai|llm)|ai|llm)([^a-z]|$)
+# "This PR was written by Devin", "This commit was generated with Copilot".
+^[[:space:]]*(this|the)[[:space:]]+(pr|pull request|commit|change|patch|code|description)[[:space:]]+(was|is|has been)[[:space:]]+([a-z]+[[:space:]]+)?(generated|written|created|authored|produced|drafted)[[:space:]]+(with|by|using)[[:space:]]+(the help of[[:space:]]+)?\[?(claude|chatgpt|openai|codex|copilot|github copilot|gemini|cursor|codeium|windsurf|devin|aider|tabnine|amazon q|cody|jules|junie|opencode|qwen|deepseek|grok|cline|amp|augment|an? (ai|llm)|ai)([^a-z]|$)
+# Devin's PR footer.
+^[[:space:]]*(link to devin run|requested by:.*devin)
+# aider's old commit-subject prefix.
+^aider:[[:space:]]

@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# Fail when commit messages or PR text carry AI attribution.
+#
+#   no-ai-attribution commits <base> <head>   every commit message in base..head
+#   no-ai-attribution text <label> [file]     a block of text (stdin when no file)
+#   no-ai-attribution commit-msg <file>       for a commit-msg hook
+#
+# Exit status: 0 clean, 1 attribution found, 2 usage or setup error.
+# NO_AI_ATTRIBUTION_PATTERNS names a pattern file other than patterns/ai-attribution.txt.
+# Under GitHub Actions the report goes out with workflow commands stopped, since commit
+# messages are untrusted text, followed by one escaped error annotation per hit.
+set -euo pipefail
+export LC_ALL=C
+
+self=$(readlink -f "${BASH_SOURCE[0]}")
+root=$(dirname "$(dirname "$self")")
+patterns_file=${NO_AI_ATTRIBUTION_PATTERNS:-$root/patterns/ai-attribution.txt}
+
+usage() {
+  sed -n '2,7p' "$self" | sed 's/^# \{0,1\}//' >&2
+  exit 2
+}
+
+[ -r "$patterns_file" ] || { echo "no-ai-attribution: can't read $patterns_file" >&2; exit 2; }
+compiled=$(mktemp)
+trap 'rm -f "$compiled"' EXIT
+grep -vE '^[[:space:]]*(#|$)' "$patterns_file" >"$compiled" || true
+[ -s "$compiled" ] || { echo "no-ai-attribution: no patterns in $patterns_file" >&2; exit 2; }
+
+# Each hit is "<label>\t<line number>\t<line>".
+hits=()
+commit_hits=0
+text_hits=0
+
+# scan <label> <kind>: read text on stdin and record every matching line.
+scan() {
+  local label=$1 kind=$2 n line
+  while IFS= read -r line; do
+    n=${line%%:*}
+    hits+=("$label"$'\t'"$n"$'\t'"${line#*:}")
+    if [ "$kind" = commit ]; then commit_hits=$((commit_hits + 1)); else text_hits=$((text_hits + 1)); fi
+  done < <(tr -d '\r' | grep -niE -f "$compiled" || true)
+}
+
+escape_data() {
+  local s=$1
+  s=${s//'%'/'%25'}
+  s=${s//$'\r'/'%0D'}
+  s=${s//$'\n'/'%0A'}
+  printf '%s' "$s"
+}
+
+report() {
+  local base=${1:-} token="" hit label n line
+  [ ${#hits[@]} -eq 0 ] && return 0
+  if [ "${GITHUB_ACTIONS:-}" = true ]; then
+    token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    echo "::stop-commands::$token"
+  fi
+  echo "AI attribution found (${#hits[@]} line(s)):"
+  echo
+  for hit in "${hits[@]}"; do
+    IFS=$'\t' read -r label n line <<<"$hit"
+    printf '  %s, line %s: %s\n' "$label" "$n" "$line"
+  done
+  echo
+  echo "Commits and PRs carry no attribution to AI tools, vendors or sessions; the person"
+  echo "who pushes a change is its author. To fix:"
+  if [ "$commit_hits" -gt 0 ]; then
+    echo "  - Commit messages: drop the lines above from each listed commit. For the last"
+    echo "    commit, 'git commit --amend'; for older ones, 'git rebase -i ${base:-<base>}' and"
+    echo "    mark them 'reword'. Then 'git push --force-with-lease'."
+  fi
+  if [ "$text_hits" -gt 0 ]; then
+    echo "  - PR title or description: edit the PR and remove the lines above. Saving the"
+    echo "    edit re-runs this check."
+  fi
+  if [ -n "$token" ]; then
+    echo "::$token::"
+    for hit in "${hits[@]}"; do
+      IFS=$'\t' read -r label n line <<<"$hit"
+      echo "::error title=AI attribution::$(escape_data "$label, line $n: $line")"
+    done
+  fi
+  return 1
+}
+
+[ $# -ge 1 ] || usage
+case $1 in
+  commits)
+    [ $# -eq 3 ] || usage
+    base=$2 head=$3
+    for ref in "$base" "$head"; do
+      if ! git cat-file -e "$ref^{commit}" 2>/dev/null; then
+        echo "no-ai-attribution: commit $ref isn't in this clone (check out with fetch-depth: 0)" >&2
+        exit 2
+      fi
+    done
+    count=0
+    while IFS= read -r sha; do
+      count=$((count + 1))
+      scan "commit ${sha:0:12}" commit < <(git log -1 --format=%B "$sha")
+    done < <(git rev-list --reverse "$base..$head")
+    echo "Scanned $count commit(s) in ${base:0:12}..${head:0:12}."
+    report "$base"
+    ;;
+  text)
+    [ $# -eq 2 ] || [ $# -eq 3 ] || usage
+    if [ $# -eq 3 ]; then scan "$2" text <"$3"; else scan "$2" text; fi
+    report
+    ;;
+  commit-msg)
+    [ $# -eq 2 ] || usage
+    # git strips # comment lines, and everything below the scissors line `commit -v` adds,
+    # from the message after the hook runs. Drop the diff and blank the comments, so line
+    # numbers still match the file.
+    scan "commit message" commit < <(sed -e '/^# -* >8 -*$/,$d' -e 's/^#.*//' "$2")
+    report HEAD
+    ;;
+  *)
+    usage
+    ;;
+esac
